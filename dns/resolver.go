@@ -14,6 +14,7 @@ import (
 	"github.com/Dreamacro/clash/common/picker"
 	"github.com/Dreamacro/clash/component/fakeip"
 	"github.com/Dreamacro/clash/component/resolver"
+	"github.com/Dreamacro/clash/component/trie"
 
 	D "github.com/miekg/dns"
 	"golang.org/x/sync/singleflight"
@@ -37,6 +38,7 @@ type Resolver struct {
 	ipv6            bool
 	mapping         bool
 	fakeip          bool
+	hosts           *trie.DomainTrie
 	pool            *fakeip.Pool
 	main            []dnsClient
 	fallback        []dnsClient
@@ -115,21 +117,23 @@ func (r *Resolver) Exchange(m *D.Msg) (msg *D.Msg, err error) {
 func (r *Resolver) exchangeWithoutCache(m *D.Msg) (msg *D.Msg, err error) {
 	q := m.Question[0]
 
-	defer func() {
-		if msg == nil {
-			return
-		}
-
-		putMsgToCache(r.lruCache, q.String(), msg)
-		if r.mapping || r.fakeip {
-			ips := r.msgToIP(msg)
-			for _, ip := range ips {
-				putMsgToCache(r.lruCache, ip.String(), msg)
+	ret, err, shared := r.group.Do(q.String(), func() (result interface{}, err error) {
+		defer func() {
+			if err != nil {
+				return
 			}
-		}
-	}()
 
-	ret, err, shared := r.group.Do(q.String(), func() (interface{}, error) {
+			msg := result.(*D.Msg)
+
+			putMsgToCache(r.lruCache, q.String(), msg)
+			if r.mapping || r.fakeip {
+				ips := r.msgToIP(msg)
+				for _, ip := range ips {
+					putMsgToCache(r.lruCache, ip.String(), msg)
+				}
+			}
+		}()
+
 		isIPReq := isIPRequest(q)
 		if isIPReq {
 			return r.fallbackExchange(m)
@@ -306,6 +310,7 @@ type Config struct {
 	EnhancedMode   EnhancedMode
 	FallbackFilter FallbackFilter
 	Pool           *fakeip.Pool
+	Hosts          *trie.DomainTrie
 }
 
 func New(config Config) *Resolver {
@@ -321,6 +326,7 @@ func New(config Config) *Resolver {
 		mapping:  config.EnhancedMode == MAPPING,
 		fakeip:   config.EnhancedMode == FAKEIP,
 		pool:     config.Pool,
+		hosts:    config.Hosts,
 	}
 
 	if len(config.Fallback) != 0 {
